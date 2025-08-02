@@ -1,46 +1,74 @@
 const { Pool } = require('pg');
 const express = require('express');
+const fs = require('fs');
 const app = express();
-require('dotenv').config();
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Simplified for Render
+// Debug environment variables
+console.log('ENV Variables:', {
+  DB_HOST: !!process.env.DB_HOST,
+  DB_USER: !!process.env.DB_USER,
+  DB_NAME: !!process.env.DB_NAME,
+  SSL_CA: process.env.SSL_CA,
+  PORT: process.env.PORT
 });
 
-// JSON API
+// Database connection with encoded password
+const pool = new Pool({
+  connectionString: `postgres://${process.env.DB_USER}:${encodeURIComponent(process.env.DB_PASSWORD)}@${process.env.DB_HOST}/${process.env.DB_NAME}`,
+  ssl: {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync(process.env.SSL_CA).toString()
+  }
+});
+
+// Test connection immediately
+pool.connect()
+  .then(client => {
+    console.log('✅ Database connected');
+    client.release();
+  })
+  .catch(err => console.error('❌ Database connection failed:', err));
+
+// Routes
+app.get('/', (req, res) => res.redirect('/library'));
+
 app.get('/songs', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM songs ORDER BY singer, title');
     res.json(result.rows);
   } catch (err) {
+    console.error('Database error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Basic HTML UI
 app.get('/library', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM songs ORDER BY singer, title');
-    let html = `<!DOCTYPE html><html><head><title>Music Library</title>
-               <style>body { font-family: sans-serif; max-width: 800px; margin: 0 auto; }
-               .song { margin: 10px; padding: 10px; border: 1px solid #ddd; }</style>
-               </head><body><h1>Music Library</h1>`;
+    const search = req.query.search || '';
+    const query = {
+      text: `SELECT * FROM songs 
+             WHERE $1 = '' OR 
+                   singer ILIKE $1 OR 
+                   title ILIKE $1 
+             ORDER BY singer, title`,
+      values: [`%${search}%`]
+    };
+    const result = await pool.query(query);
     
-    result.rows.forEach(song => {
-      html += `<div class="song">
-              <h3>${song.title}</h3>
-              <p>Artist: ${song.singer}</p>
-              <a href="${song.youtubelink}" target="_blank">YouTube</a>
-              </div>`;
-    });
-
-    html += `</body></html>`;
-    res.send(html);
+    // HTML response
+    res.send(`
+      <html>
+        <body>
+          <h1>Search Results</h1>
+          <pre>${JSON.stringify(result.rows, null, 2)}</pre>
+        </body>
+      </html>
+    `);
   } catch (err) {
-    res.status(500).send(`<h1>Error</h1><p>${err.message}</p>`);
+    res.status(500).send(err.message);
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(process.env.PORT, () => {
+  console.log(`Server running on port ${process.env.PORT}`);
+});
