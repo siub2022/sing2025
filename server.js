@@ -1,33 +1,49 @@
 const { Pool } = require('pg');
 const express = require('express');
-const fs = require('fs');
 const app = express();
 
-// Debug environment variables
-console.log('ENV Variables:', {
+// Debug startup
+console.log('=== Starting sing2025 Service ===');
+console.log('Node Version:', process.version);
+console.log('Environment Variables:', {
   DB_HOST: !!process.env.DB_HOST,
   DB_USER: !!process.env.DB_USER,
-  DB_NAME: !!process.env.DB_NAME,
-  SSL_CA: process.env.SSL_CA,
-  PORT: process.env.PORT
+  NODE_ENV: process.env.NODE_ENV || 'development'
 });
 
-// Database connection with encoded password
-const pool = new Pool({
-  connectionString: `postgres://${process.env.DB_USER}:${encodeURIComponent(process.env.DB_PASSWORD)}@${process.env.DB_HOST}/${process.env.DB_NAME}`,
-  ssl: {
-    rejectUnauthorized: true,
-    ca: fs.readFileSync(process.env.SSL_CA).toString()
+// Database connection with multiple fallbacks
+const createPool = () => {
+  const connectionString = `postgres://${process.env.DB_USER}:${encodeURIComponent(process.env.DB_PASSWORD)}@${process.env.DB_HOST}/${process.env.DB_NAME}`;
+  
+  // Try SSL first, then fallback to non-SSL
+  const configs = [
+    {
+      connectionString,
+      ssl: { 
+        rejectUnauthorized: true,
+        ca: require('fs').readFileSync('/etc/ssl/certs/ca-certificates.crt').toString()
+      }
+    },
+    {
+      connectionString,
+      ssl: false
+    }
+  ];
+
+  for (const config of configs) {
+    try {
+      const pool = new Pool(config);
+      await pool.query('SELECT NOW()'); // Test connection
+      console.log(`✅ Database connected ${config.ssl ? 'with SSL' : 'without SSL'}`);
+      return pool;
+    } catch (err) {
+      console.warn(`⚠️ Connection attempt failed: ${err.message}`);
+    }
   }
-});
+  throw new Error('All database connection attempts failed');
+};
 
-// Test connection immediately
-pool.connect()
-  .then(client => {
-    console.log('✅ Database connected');
-    client.release();
-  })
-  .catch(err => console.error('❌ Database connection failed:', err));
+const pool = await createPool();
 
 // Routes
 app.get('/', (req, res) => res.redirect('/library'));
@@ -38,37 +54,63 @@ app.get('/songs', async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('Database error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ 
+      error: 'Service unavailable',
+      details: process.env.NODE_ENV === 'development' ? err.message : null
+    });
   }
 });
 
 app.get('/library', async (req, res) => {
   try {
     const search = req.query.search || '';
-    const query = {
-      text: `SELECT * FROM songs 
-             WHERE $1 = '' OR 
-                   singer ILIKE $1 OR 
-                   title ILIKE $1 
-             ORDER BY singer, title`,
-      values: [`%${search}%`]
-    };
-    const result = await pool.query(query);
+    const result = await pool.query(
+      `SELECT * FROM songs 
+       WHERE $1 = '' OR singer ILIKE $1 OR title ILIKE $1 
+       ORDER BY singer, title`,
+      [`%${search}%`]
+    );
     
-    // HTML response
     res.send(`
+      <!DOCTYPE html>
       <html>
-        <body>
-          <h1>Search Results</h1>
-          <pre>${JSON.stringify(result.rows, null, 2)}</pre>
-        </body>
+      <head>
+        <title>sing2025 Music Library</title>
+        <style>
+          body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+          .song { margin: 15px 0; padding: 10px; border-radius: 5px; background: #f8f9fa; }
+          .search { margin: 20px 0; }
+        </style>
+      </head>
+      <body>
+        <h1>sing2025 Music Library</h1>
+        <form class="search" action="/library">
+          <input type="text" name="search" value="${search.replace(/"/g, '&quot;')}" placeholder="Search songs...">
+          <button type="submit">Search</button>
+        </form>
+        ${result.rows.map(song => `
+          <div class="song">
+            <h3>${song.title}</h3>
+            <p>Artist: ${song.singer}</p>
+            ${song.youtubelink ? `<a href="${song.youtubelink}" target="_blank">▶ Watch</a>` : ''}
+          </div>
+        `).join('')}
+      </body>
       </html>
     `);
   } catch (err) {
-    res.status(500).send(err.message);
+    res.status(500).send('Service unavailable');
   }
 });
 
-app.listen(process.env.PORT, () => {
-  console.log(`Server running on port ${process.env.PORT}`);
+// Start server
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Service running on port ${PORT}`);
+  console.log(`Web: http://localhost:${PORT}/library`);
+  console.log(`API: http://localhost:${PORT}/songs`);
+});
+
+process.on('unhandledRejection', err => {
+  console.error('Unhandled rejection:', err);
 });
