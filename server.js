@@ -3,120 +3,182 @@ const express = require('express');
 const fs = require('fs');
 const app = express();
 
-// Debug startup
-console.log('=== Starting sing2025 Service ===');
-console.log('Node Version:', process.version);
-
-// Database connection with async wrapper
-async function initializeDatabase() {
-  const connectionString = `postgres://${process.env.DB_USER}:${encodeURIComponent(process.env.DB_PASSWORD)}@${process.env.DB_HOST}/${process.env.DB_NAME}`;
-  
-  const configs = [
-    { // Try with SSL first
-      connectionString,
-      ssl: { 
-        rejectUnauthorized: true,
-        ca: fs.readFileSync('/etc/ssl/certs/ca-certificates.crt').toString()
-      }
-    },
-    { // Fallback without SSL
-      connectionString,
-      ssl: false
-    }
-  ];
-
-  for (const config of configs) {
-    const pool = new Pool(config);
-    try {
-      await pool.query('SELECT NOW()');
-      console.log(`✅ Database connected ${config.ssl ? 'with SSL' : 'without SSL'}`);
-      return pool;
-    } catch (err) {
-      console.warn(`⚠️ Connection attempt failed: ${err.message}`);
-      await pool.end();
-    }
+// Database configuration (Render-specific)
+const pool = new Pool({
+  user: process.env.DB_USER || 'db2025_user',
+  host: process.env.DB_HOST || 'dpg-d23sgh3e5dus73b245mg-a.singapore-postgres.render.com',
+  database: process.env.DB_NAME || 'db2025',
+  password: process.env.DB_PASSWORD || '9ok43BSy483OGvPCzpRLa5VnjnnFS4lv',
+  port: 5432,
+  ssl: {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync(process.env.SSL_CA || '/etc/ssl/certs/ca-certificates.crt').toString()
   }
-  throw new Error('All database connection attempts failed');
-}
+});
 
-// Initialize app
-(async () => {
+// Middleware
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+// HTML Escape Helper
+const escapeHtml = (text) => text?.toString()
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;') || '';
+
+// ==================== ROUTES ====================
+
+// Homepage
+app.get('/', (req, res) => res.redirect('/library'));
+
+// List all songs (Read)
+app.get('/library', async (req, res) => {
   try {
-    const pool = await initializeDatabase();
+    const songs = (await pool.query('SELECT * FROM songs ORDER BY singer, title')).rows;
+    let html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Music Library</title>
+        <style>
+          body { font-family: Arial; max-width: 800px; margin: 0 auto; padding: 20px; }
+          .song { border: 1px solid #e0e0e0; padding: 15px; margin-bottom: 15px; border-radius: 5px; }
+          .actions a { margin-right: 10px; color: #1a73e8; }
+          form { display: grid; gap: 10px; max-width: 500px; }
+          input, button { padding: 8px; }
+        </style>
+      </head>
+      <body>
+        <h1>Song Library</h1>
+        <a href="/create" style="display: inline-block; margin-bottom: 20px; padding: 8px 12px; background: #1a73e8; color: white; text-decoration: none; border-radius: 4px;">＋ Add New Song</a>
+    `;
 
-    // Routes
-    app.get('/', (req, res) => res.redirect('/library'));
-
-    app.get('/songs', async (req, res) => {
-      try {
-        const result = await pool.query('SELECT * FROM songs ORDER BY singer, title');
-        res.json(result.rows);
-      } catch (err) {
-        console.error('Database error:', err);
-        res.status(500).json({ 
-          error: 'Service unavailable',
-          details: process.env.NODE_ENV === 'development' ? err.message : null
-        });
-      }
+    songs.forEach(song => {
+      html += `
+        <div class="song">
+          <h3>${escapeHtml(song.title)}</h3>
+          <p>Artist: ${escapeHtml(song.singer)}</p>
+          ${song.youtubelink ? `<p><a href="${escapeHtml(song.youtubelink)}" target="_blank">▶ Watch on YouTube</a></p>` : ''}
+          <div class="actions">
+            <a href="/update/${song.id}">✏️ Edit</a>
+            <a href="/delete/${song.id}" style="color: #d32f2f;">🗑️ Delete</a>
+          </div>
+        </div>
+      `;
     });
 
-    app.get('/library', async (req, res) => {
-      try {
-        const search = req.query.search || '';
-        const result = await pool.query(
-          `SELECT * FROM songs 
-           WHERE $1 = '' OR singer ILIKE $1 OR title ILIKE $1 
-           ORDER BY singer, title`,
-          [`%${search}%`]
-        );
-        
-        res.send(`
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <title>sing2025 Music Library</title>
-            <style>
-              body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-              .song { margin: 15px 0; padding: 10px; border-radius: 5px; background: #f8f9fa; }
-              .search { margin: 20px 0; }
-            </style>
-          </head>
-          <body>
-            <h1>sing2025 Music Library</h1>
-            <form class="search" action="/library">
-              <input type="text" name="search" value="${search.replace(/"/g, '&quot;')}" placeholder="Search songs...">
-              <button type="submit">Search</button>
-            </form>
-            ${result.rows.map(song => `
-              <div class="song">
-                <h3>${song.title}</h3>
-                <p>Artist: ${song.singer}</p>
-                ${song.youtubelink ? `<a href="${song.youtubelink}" target="_blank">▶ Watch</a>` : ''}
-              </div>
-            `).join('')}
-          </body>
-          </html>
-        `);
-      } catch (err) {
-        res.status(500).send('Service unavailable');
-      }
-    });
-
-    // Start server
-    const PORT = process.env.PORT || 10000;
-    app.listen(PORT, () => {
-      console.log(`🚀 Service running on port ${PORT}`);
-      console.log(`Web: http://localhost:${PORT}/library`);
-      console.log(`API: http://localhost:${PORT}/songs`);
-    });
-
+    res.send(html + '</body></html>');
   } catch (err) {
-    console.error('Fatal startup error:', err);
-    process.exit(1);
+    res.status(500).send(`<h1>Error</h1><pre>${escapeHtml(err.message)}</pre>`);
   }
-})();
+});
 
-// Error handling
-process.on('unhandledRejection', err => {
-  console.error('Unhandled rejection:', err);
+// Create song form
+app.get('/create', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <body>
+      <h1>Add New Song</h1>
+      <form action="/create" method="POST">
+        <input type="text" name="singer" placeholder="Artist" required>
+        <input type="text" name="title" placeholder="Song Title" required>
+        <input type="url" name="youtubelink" placeholder="YouTube URL">
+        <button type="submit">Save</button>
+        <a href="/library">Cancel</a>
+      </form>
+    </body>
+    </html>
+  `);
+});
+
+// Create song handler (Create)
+app.post('/create', async (req, res) => {
+  try {
+    await pool.query(
+      'INSERT INTO songs (singer, title, youtubelink) VALUES ($1, $2, $3)',
+      [req.body.singer, req.body.title, req.body.youtubelink]
+    );
+    res.redirect('/library');
+  } catch (err) {
+    res.status(500).send(`<h1>Error</h1><pre>${escapeHtml(err.message)}</pre>`);
+  }
+});
+
+// Update song form (Update)
+app.get('/update/:id', async (req, res) => {
+  try {
+    const song = (await pool.query('SELECT * FROM songs WHERE id = $1', [req.params.id])).rows[0];
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <body>
+        <h1>Edit Song</h1>
+        <form action="/update/${song.id}" method="POST">
+          <input type="text" name="singer" value="${escapeHtml(song.singer)}" required>
+          <input type="text" name="title" value="${escapeHtml(song.title)}" required>
+          <input type="url" name="youtubelink" value="${escapeHtml(song.youtubelink || '')}">
+          <button type="submit">Update</button>
+          <a href="/library">Cancel</a>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    res.status(500).send(`<h1>Error</h1><pre>${escapeHtml(err.message)}</pre>`);
+  }
+});
+
+// Update song handler
+app.post('/update/:id', async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE songs SET singer = $1, title = $2, youtubelink = $3 WHERE id = $4',
+      [req.body.singer, req.body.title, req.body.youtubelink, req.params.id]
+    );
+    res.redirect('/library');
+  } catch (err) {
+    res.status(500).send(`<h1>Error</h1><pre>${escapeHtml(err.message)}</pre>`);
+  }
+});
+
+// Delete confirmation (Delete)
+app.get('/delete/:id', async (req, res) => {
+  try {
+    const song = (await pool.query('SELECT * FROM songs WHERE id = $1', [req.params.id])).rows[0];
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <body>
+        <h1>Delete Song?</h1>
+        <p>Are you sure you want to delete "${escapeHtml(song.title)}" by ${escapeHtml(song.singer)}?</p>
+        <form action="/delete/${song.id}" method="POST">
+          <button type="submit" style="background: #d32f2f; color: white;">Confirm Delete</button>
+          <a href="/library">Cancel</a>
+        </form>
+      </body>
+      </html>
+    `);
+  } catch (err) {
+    res.status(500).send(`<h1>Error</h1><pre>${escapeHtml(err.message)}</pre>`);
+  }
+});
+
+// Delete song handler
+app.post('/delete/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM songs WHERE id = $1', [req.params.id]);
+    res.redirect('/library');
+  } catch (err) {
+    res.status(500).send(`<h1>Error</h1><pre>${escapeHtml(err.message)}</pre>`);
+  }
+});
+
+// Start server
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Web UI: http://localhost:${PORT}/library`);
+  console.log(`API: http://localhost:${PORT}/songs`);
 });
